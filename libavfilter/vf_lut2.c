@@ -125,11 +125,12 @@ static av_cold void uninit(AVFilterContext *ctx)
 
 #define BIT12_FMTS \
     AV_PIX_FMT_YUV420P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV444P12, AV_PIX_FMT_YUV440P12, \
+    AV_PIX_FMT_YUVA422P12, AV_PIX_FMT_YUVA444P12, \
     AV_PIX_FMT_GRAY12, AV_PIX_FMT_GBRAP12, AV_PIX_FMT_GBRP12,
 
 #define BIT14_FMTS \
     AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14, \
-    AV_PIX_FMT_GRAY12, AV_PIX_FMT_GBRP14,
+    AV_PIX_FMT_GRAY14, AV_PIX_FMT_GBRP14,
 
 #define BIT16_FMTS \
     AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16, \
@@ -176,7 +177,7 @@ static int query_formats(AVFilterContext *ctx)
     if (s->tlut2 || !s->odepth)
         return ff_set_common_formats(ctx, ff_make_format_list(all_pix_fmts));
 
-    ret = ff_formats_ref(ff_make_format_list(all_pix_fmts), &ctx->inputs[0]->out_formats);
+    ret = ff_formats_ref(ff_make_format_list(all_pix_fmts), &ctx->inputs[0]->outcfg.formats);
     if (ret < 0)
         return ret;
 
@@ -191,7 +192,7 @@ static int query_formats(AVFilterContext *ctx)
              return AVERROR(EINVAL);
     }
 
-    return ff_formats_ref(ff_make_format_list(pix_fmts), &ctx->outputs[0]->in_formats);
+    return ff_formats_ref(ff_make_format_list(pix_fmts), &ctx->outputs[0]->incfg.formats);
 }
 
 static int config_inputx(AVFilterLink *inlink)

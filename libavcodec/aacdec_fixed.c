@@ -155,9 +155,9 @@ static void vector_pow43(int *coefs, int len)
     for (i=0; i<len; i++) {
         coef = coefs[i];
         if (coef < 0)
-            coef = -(int)ff_cbrt_tab_fixed[-coef];
+            coef = -(int)ff_cbrt_tab_fixed[(-coef) & 8191];
         else
-            coef = (int)ff_cbrt_tab_fixed[coef];
+            coef =  (int)ff_cbrt_tab_fixed[  coef  & 8191];
         coefs[i] = coef;
     }
 }
@@ -461,7 +461,7 @@ AVCodec ff_aac_fixed_decoder = {
         AV_SAMPLE_FMT_S32P, AV_SAMPLE_FMT_NONE
     },
     .capabilities    = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
-    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE,
+    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
     .channel_layouts = aac_channel_layout,
     .profiles        = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
     .flush = flush,

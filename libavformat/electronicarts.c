@@ -530,20 +530,17 @@ static int ea_read_header(AVFormatContext *s)
         if (ea->num_channels <= 0 || ea->num_channels > 2) {
             av_log(s, AV_LOG_WARNING,
                    "Unsupported number of channels: %d\n", ea->num_channels);
-            ea->audio_codec = 0;
-            return 1;
+            goto no_audio;
         }
         if (ea->sample_rate <= 0) {
             av_log(s, AV_LOG_ERROR,
                    "Unsupported sample rate: %d\n", ea->sample_rate);
-            ea->audio_codec = 0;
-            return 1;
+            goto no_audio;
         }
         if (ea->bytes <= 0 || ea->bytes > 2) {
             av_log(s, AV_LOG_ERROR,
                    "Invalid number of bytes per sample: %d\n", ea->bytes);
-            ea->audio_codec = AV_CODEC_ID_NONE;
-            return 1;
+            goto no_audio;
         }
 
         /* initialize the audio decoder stream */
@@ -564,9 +561,14 @@ static int ea_read_header(AVFormatContext *s)
                                               st->codecpar->bits_per_coded_sample;
         ea->audio_stream_index           = st->index;
         st->start_time                   = 0;
+        return 0;
     }
+no_audio:
+    ea->audio_codec = AV_CODEC_ID_NONE;
 
-    return 1;
+    if (!ea->video.codec)
+        return AVERROR_INVALIDDATA;
+    return 0;
 }
 
 static int ea_read_packet(AVFormatContext *s, AVPacket *pkt)
@@ -633,7 +635,6 @@ static int ea_read_packet(AVFormatContext *s, AVPacket *pkt)
             case AV_CODEC_ID_ADPCM_EA_R3:
                 if (pkt->size < 4) {
                     av_log(s, AV_LOG_ERROR, "Packet is too short\n");
-                    av_packet_unref(pkt);
                     return AVERROR_INVALIDDATA;
                 }
                 if (ea->audio_codec == AV_CODEC_ID_ADPCM_EA_R3)
@@ -736,8 +737,6 @@ get_video_packet:
         }
     }
 
-    if (ret < 0 && partial_packet)
-        av_packet_unref(pkt);
     if (ret >= 0 && hit_end && !packet_read)
         return AVERROR(EAGAIN);
 
