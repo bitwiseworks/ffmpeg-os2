@@ -23,6 +23,7 @@
 
 #include "libavutil/buffer.h"
 #include "libavutil/frame.h"
+#include "libavutil/internal.h"
 
 /**
  * Frame pool. This structure is opaque and not meant to be accessed
@@ -40,10 +41,10 @@ typedef struct FFFramePool FFFramePool;
  * @param width width of each frame in this pool
  * @param height height of each frame in this pool
  * @param format format of each frame in this pool
- * @param align buffers alignement of each frame in this pool
+ * @param align buffers alignment of each frame in this pool
  * @return newly created video frame pool on success, NULL on error.
  */
-FFFramePool *ff_frame_pool_video_init(AVBufferRef* (*alloc)(int size),
+FFFramePool *ff_frame_pool_video_init(AVBufferRef* (*alloc)(size_t size),
                                       int width,
                                       int height,
                                       enum AVPixelFormat format,
@@ -58,10 +59,10 @@ FFFramePool *ff_frame_pool_video_init(AVBufferRef* (*alloc)(int size),
  * @param channels channels of each frame in this pool
  * @param nb_samples number of samples of each frame in this pool
  * @param format format of each frame in this pool
- * @param align buffers alignement of each frame in this pool
+ * @param align buffers alignment of each frame in this pool
  * @return newly created audio frame pool on success, NULL on error.
  */
-FFFramePool *ff_frame_pool_audio_init(AVBufferRef* (*alloc)(int size),
+FFFramePool *ff_frame_pool_audio_init(AVBufferRef* (*alloc)(size_t size),
                                       int channels,
                                       int samples,
                                       enum AVSampleFormat format,
@@ -81,7 +82,7 @@ void ff_frame_pool_uninit(FFFramePool **pool);
  * @param width width of each frame in this pool
  * @param height height of each frame in this pool
  * @param format format of each frame in this pool
- * @param align buffers alignement of each frame in this pool
+ * @param align buffers alignment of each frame in this pool
  * @return 0 on success, a negative AVERROR otherwise.
  */
 int ff_frame_pool_get_video_config(FFFramePool *pool,
@@ -96,7 +97,7 @@ int ff_frame_pool_get_video_config(FFFramePool *pool,
  * @param channels channels of each frame in this pool
  * @param nb_samples number of samples of each frame in this pool
  * @param format format of each frame in this pool
- * @param align buffers alignement of each frame in this pool
+ * @param align buffers alignment of each frame in this pool
  * @return 0 on success, a negative AVERROR otherwise.
  */
 int ff_frame_pool_get_audio_config(FFFramePool *pool,
@@ -107,7 +108,7 @@ int ff_frame_pool_get_audio_config(FFFramePool *pool,
 
 
 /**
- * Allocate a new AVFrame, reussing old buffers from the pool when available.
+ * Allocate a new AVFrame, reusing old buffers from the pool when available.
  * This function may be called simultaneously from multiple threads.
  *
  * @return a new AVFrame on success, NULL on error.

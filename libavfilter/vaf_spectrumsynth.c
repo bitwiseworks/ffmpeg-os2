@@ -24,18 +24,16 @@
  * @todo support float pixel format
  */
 
-#include "libavcodec/avfft.h"
+#include "libavutil/mem.h"
+#include "libavutil/tx.h"
 #include "libavutil/avassert.h"
-#include "libavutil/channel_layout.h"
+#include "libavutil/cpu.h"
 #include "libavutil/ffmath.h"
 #include "libavutil/opt.h"
-#include "libavutil/parseutils.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "audio.h"
-#include "video.h"
 #include "filters.h"
-#include "internal.h"
 #include "window_func.h"
 
 enum MagnitudeScale { LINEAR, LOG, NB_SCALES };
@@ -53,9 +51,10 @@ typedef struct SpectrumSynthContext {
     int orientation;
 
     AVFrame *magnitude, *phase;
-    FFTContext *fft;            ///< Fast Fourier Transform context
-    int fft_bits;               ///< number of bits (FFT window size = 1<<fft_bits)
-    FFTComplex **fft_data;      ///< bins holder for each (displayed) channels
+    AVTXContext *fft;           ///< Fast Fourier Transform context
+    av_tx_fn tx_fn;
+    AVComplexFloat **fft_in;    ///< bins holder for each (displayed) channels
+    AVComplexFloat **fft_out;   ///< bins holder for each (displayed) channels
     int win_size;
     int size;
     int nb_freq;
@@ -76,38 +75,36 @@ typedef struct SpectrumSynthContext {
 static const AVOption spectrumsynth_options[] = {
     { "sample_rate", "set sample rate",  OFFSET(sample_rate), AV_OPT_TYPE_INT, {.i64 = 44100}, 15,  INT_MAX, A },
     { "channels",    "set channels",     OFFSET(channels), AV_OPT_TYPE_INT, {.i64 = 1}, 1, 8, A },
-    { "scale",       "set input amplitude scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64 = LOG}, 0, NB_SCALES-1, V, "scale" },
-        { "lin",  "linear",      0, AV_OPT_TYPE_CONST, {.i64=LINEAR}, 0, 0, V, "scale" },
-        { "log",  "logarithmic", 0, AV_OPT_TYPE_CONST, {.i64=LOG},    0, 0, V, "scale" },
-    { "slide", "set input sliding mode", OFFSET(sliding), AV_OPT_TYPE_INT, {.i64 = FULLFRAME}, 0, NB_SLIDES-1, V, "slide" },
-        { "replace",   "consume old columns with new",   0, AV_OPT_TYPE_CONST, {.i64=REPLACE},   0, 0, V, "slide" },
-        { "scroll",    "consume only most right column", 0, AV_OPT_TYPE_CONST, {.i64=SCROLL},    0, 0, V, "slide" },
-        { "fullframe", "consume full frames",            0, AV_OPT_TYPE_CONST, {.i64=FULLFRAME}, 0, 0, V, "slide" },
-        { "rscroll",   "consume only most left column",  0, AV_OPT_TYPE_CONST, {.i64=RSCROLL},   0, 0, V, "slide" },
-    { "win_func", "set window function", OFFSET(win_func), AV_OPT_TYPE_INT, {.i64 = 0}, 0, NB_WFUNC-1, A, "win_func" },
-        { "rect",     "Rectangular",      0, AV_OPT_TYPE_CONST, {.i64=WFUNC_RECT},     0, 0, A, "win_func" },
-        { "bartlett", "Bartlett",         0, AV_OPT_TYPE_CONST, {.i64=WFUNC_BARTLETT}, 0, 0, A, "win_func" },
-        { "hann",     "Hann",             0, AV_OPT_TYPE_CONST, {.i64=WFUNC_HANNING},  0, 0, A, "win_func" },
-        { "hanning",  "Hanning",          0, AV_OPT_TYPE_CONST, {.i64=WFUNC_HANNING},  0, 0, A, "win_func" },
-        { "hamming",  "Hamming",          0, AV_OPT_TYPE_CONST, {.i64=WFUNC_HAMMING},  0, 0, A, "win_func" },
-        { "sine",     "Sine",             0, AV_OPT_TYPE_CONST, {.i64=WFUNC_SINE},     0, 0, A, "win_func" },
+    { "scale",       "set input amplitude scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64 = LOG}, 0, NB_SCALES-1, V, .unit = "scale" },
+        { "lin",  "linear",      0, AV_OPT_TYPE_CONST, {.i64=LINEAR}, 0, 0, V, .unit = "scale" },
+        { "log",  "logarithmic", 0, AV_OPT_TYPE_CONST, {.i64=LOG},    0, 0, V, .unit = "scale" },
+    { "slide", "set input sliding mode", OFFSET(sliding), AV_OPT_TYPE_INT, {.i64 = FULLFRAME}, 0, NB_SLIDES-1, V, .unit = "slide" },
+        { "replace",   "consume old columns with new",   0, AV_OPT_TYPE_CONST, {.i64=REPLACE},   0, 0, V, .unit = "slide" },
+        { "scroll",    "consume only most right column", 0, AV_OPT_TYPE_CONST, {.i64=SCROLL},    0, 0, V, .unit = "slide" },
+        { "fullframe", "consume full frames",            0, AV_OPT_TYPE_CONST, {.i64=FULLFRAME}, 0, 0, V, .unit = "slide" },
+        { "rscroll",   "consume only most left column",  0, AV_OPT_TYPE_CONST, {.i64=RSCROLL},   0, 0, V, .unit = "slide" },
+    WIN_FUNC_OPTION("win_func", OFFSET(win_func), A, 0),
     { "overlap", "set window overlap",  OFFSET(overlap), AV_OPT_TYPE_FLOAT, {.dbl=1}, 0,  1, A },
-    { "orientation", "set orientation", OFFSET(orientation), AV_OPT_TYPE_INT, {.i64=VERTICAL}, 0, NB_ORIENTATIONS-1, V, "orientation" },
-        { "vertical",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=VERTICAL},   0, 0, V, "orientation" },
-        { "horizontal", NULL, 0, AV_OPT_TYPE_CONST, {.i64=HORIZONTAL}, 0, 0, V, "orientation" },
+    { "orientation", "set orientation", OFFSET(orientation), AV_OPT_TYPE_INT, {.i64=VERTICAL}, 0, NB_ORIENTATIONS-1, V, .unit = "orientation" },
+        { "vertical",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=VERTICAL},   0, 0, V, .unit = "orientation" },
+        { "horizontal", NULL, 0, AV_OPT_TYPE_CONST, {.i64=HORIZONTAL}, 0, 0, V, .unit = "orientation" },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(spectrumsynth);
 
-static int query_formats(AVFilterContext *ctx)
+enum {
+    MAGNITUDE = 0,
+    PHASE     = 1,
+};
+
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    SpectrumSynthContext *s = ctx->priv;
+    const SpectrumSynthContext *s = ctx->priv;
     AVFilterFormats *formats = NULL;
     AVFilterChannelLayouts *layout = NULL;
-    AVFilterLink *magnitude = ctx->inputs[0];
-    AVFilterLink *phase = ctx->inputs[1];
-    AVFilterLink *outlink = ctx->outputs[0];
     static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE };
     static const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY16,
                                                    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
@@ -115,28 +112,28 @@ static int query_formats(AVFilterContext *ctx)
     int ret, sample_rates[] = { 48000, -1 };
 
     formats = ff_make_format_list(sample_fmts);
-    if ((ret = ff_formats_ref         (formats, &outlink->incfg.formats        )) < 0 ||
-        (ret = ff_add_channel_layout  (&layout, FF_COUNT2LAYOUT(s->channels))) < 0 ||
-        (ret = ff_channel_layouts_ref (layout , &outlink->incfg.channel_layouts)) < 0)
+    if ((ret = ff_formats_ref         (formats, &cfg_out[0]->formats         )) < 0 ||
+        (ret = ff_add_channel_layout  (&layout, &FF_COUNT2LAYOUT(s->channels))) < 0 ||
+        (ret = ff_channel_layouts_ref (layout , &cfg_out[0]->channel_layouts)) < 0)
         return ret;
 
     sample_rates[0] = s->sample_rate;
     formats = ff_make_format_list(sample_rates);
     if (!formats)
         return AVERROR(ENOMEM);
-    if ((ret = ff_formats_ref(formats, &outlink->incfg.samplerates)) < 0)
+    if ((ret = ff_formats_ref(formats, &cfg_out[0]->samplerates)) < 0)
         return ret;
 
     formats = ff_make_format_list(pix_fmts);
     if (!formats)
         return AVERROR(ENOMEM);
-    if ((ret = ff_formats_ref(formats, &magnitude->outcfg.formats)) < 0)
+    if ((ret = ff_formats_ref(formats, &cfg_in[MAGNITUDE]->formats)) < 0)
         return ret;
 
     formats = ff_make_format_list(pix_fmts);
     if (!formats)
         return AVERROR(ENOMEM);
-    if ((ret = ff_formats_ref(formats, &phase->outcfg.formats)) < 0)
+    if ((ret = ff_formats_ref(formats, &cfg_in[PHASE]->formats)) < 0)
         return ret;
 
     return 0;
@@ -146,12 +143,14 @@ static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
     SpectrumSynthContext *s = ctx->priv;
+    FilterLink *inl0 = ff_filter_link(ctx->inputs[0]);
+    FilterLink *inl1 = ff_filter_link(ctx->inputs[1]);
     int width = ctx->inputs[0]->w;
     int height = ctx->inputs[0]->h;
     AVRational time_base  = ctx->inputs[0]->time_base;
-    AVRational frame_rate = ctx->inputs[0]->frame_rate;
-    int i, ch, fft_bits;
+    AVRational frame_rate = inl0->frame_rate;
     float factor, overlap;
+    int i, ch, ret;
 
     outlink->sample_rate = s->sample_rate;
     outlink->time_base = (AVRational){1, s->sample_rate};
@@ -170,35 +169,42 @@ static int config_output(AVFilterLink *outlink)
                ctx->inputs[1]->time_base.num,
                ctx->inputs[1]->time_base.den);
         return AVERROR_INVALIDDATA;
-    } else if (av_cmp_q(frame_rate, ctx->inputs[1]->frame_rate) != 0) {
+    } else if (av_cmp_q(frame_rate, inl1->frame_rate) != 0) {
         av_log(ctx, AV_LOG_ERROR,
                "Magnitude and Phase framerates differ (%d/%d vs %d/%d).\n",
                frame_rate.num, frame_rate.den,
-               ctx->inputs[1]->frame_rate.num,
-               ctx->inputs[1]->frame_rate.den);
+               inl1->frame_rate.num,
+               inl1->frame_rate.den);
         return AVERROR_INVALIDDATA;
     }
 
     s->size = s->orientation == VERTICAL ? height / s->channels : width / s->channels;
     s->xend = s->orientation == VERTICAL ? width : height;
 
-    for (fft_bits = 1; 1 << fft_bits < 2 * s->size; fft_bits++);
+    s->win_size = s->size * 2;
+    s->nb_freq = s->size;
 
-    s->win_size = 1 << fft_bits;
-    s->nb_freq = 1 << (fft_bits - 1);
-
-    s->fft = av_fft_init(fft_bits, 1);
-    if (!s->fft) {
+    ret = av_tx_init(&s->fft, &s->tx_fn, AV_TX_FLOAT_FFT, 1, s->win_size, NULL, 0);
+    if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Unable to create FFT context. "
                "The window size might be too high.\n");
-        return AVERROR(EINVAL);
+        return ret;
     }
-    s->fft_data = av_calloc(s->channels, sizeof(*s->fft_data));
-    if (!s->fft_data)
+
+    s->fft_in = av_calloc(s->channels, sizeof(*s->fft_in));
+    if (!s->fft_in)
         return AVERROR(ENOMEM);
+    s->fft_out = av_calloc(s->channels, sizeof(*s->fft_out));
+    if (!s->fft_out)
+        return AVERROR(ENOMEM);
+
     for (ch = 0; ch < s->channels; ch++) {
-        s->fft_data[ch] = av_calloc(s->win_size, sizeof(**s->fft_data));
-        if (!s->fft_data[ch])
+        s->fft_in[ch] = av_calloc(FFALIGN(s->win_size, av_cpu_max_align()), sizeof(**s->fft_in));
+        if (!s->fft_in[ch])
+            return AVERROR(ENOMEM);
+
+        s->fft_out[ch] = av_calloc(FFALIGN(s->win_size, av_cpu_max_align()), sizeof(**s->fft_out));
+        if (!s->fft_out[ch])
             return AVERROR(ENOMEM);
     }
 
@@ -244,8 +250,8 @@ static void read16_fft_bin(SpectrumSynthContext *s,
     }
     phase = ((p[x] / (double)UINT16_MAX) * 2. - 1.) * M_PI;
 
-    s->fft_data[ch][f].re = magnitude * cos(phase);
-    s->fft_data[ch][f].im = magnitude * sin(phase);
+    s->fft_in[ch][f].re = magnitude * cos(phase);
+    s->fft_in[ch][f].im = magnitude * sin(phase);
 }
 
 static void read8_fft_bin(SpectrumSynthContext *s,
@@ -269,8 +275,8 @@ static void read8_fft_bin(SpectrumSynthContext *s,
     }
     phase = ((p[x] / (double)UINT8_MAX) * 2. - 1.) * M_PI;
 
-    s->fft_data[ch][f].re = magnitude * cos(phase);
-    s->fft_data[ch][f].im = magnitude * sin(phase);
+    s->fft_in[ch][f].re = magnitude * cos(phase);
+    s->fft_in[ch][f].im = magnitude * sin(phase);
 }
 
 static void read_fft_data(AVFilterContext *ctx, int x, int h, int ch)
@@ -330,17 +336,16 @@ static void synth_window(AVFilterContext *ctx, int x)
         read_fft_data(ctx, x, h, ch);
 
         for (y = h; y <= s->nb_freq; y++) {
-            s->fft_data[ch][y].re = 0;
-            s->fft_data[ch][y].im = 0;
+            s->fft_in[ch][y].re = 0;
+            s->fft_in[ch][y].im = 0;
         }
 
         for (y = s->nb_freq + 1, f = s->nb_freq - 1; y < nb; y++, f--) {
-            s->fft_data[ch][y].re =  s->fft_data[ch][f].re;
-            s->fft_data[ch][y].im = -s->fft_data[ch][f].im;
+            s->fft_in[ch][y].re =  s->fft_in[ch][f].re;
+            s->fft_in[ch][y].im = -s->fft_in[ch][f].im;
         }
 
-        av_fft_permute(s->fft, s->fft_data[ch]);
-        av_fft_calc(s->fft, s->fft_data[ch]);
+        s->tx_fn(s->fft, s->fft_out[ch], s->fft_in[ch], sizeof(AVComplexFloat));
     }
 }
 
@@ -363,11 +368,11 @@ static int try_push_frame(AVFilterContext *ctx, int x)
         end = s->end;
         k = end;
         for (i = 0, j = start; j < k && i < s->win_size; i++, j++) {
-            buf[j] += s->fft_data[ch][i].re;
+            buf[j] += s->fft_out[ch][i].re;
         }
 
         for (; i < s->win_size; i++, j++) {
-            buf[j] = s->fft_data[ch][i].re;
+            buf[j] = s->fft_out[ch][i].re;
         }
 
         start += s->hop_size;
@@ -499,12 +504,19 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_frame_free(&s->magnitude);
     av_frame_free(&s->phase);
     av_frame_free(&s->buffer);
-    av_fft_end(s->fft);
-    if (s->fft_data) {
+
+    av_tx_uninit(&s->fft);
+
+    if (s->fft_in) {
         for (i = 0; i < s->channels; i++)
-            av_freep(&s->fft_data[i]);
+            av_freep(&s->fft_in[i]);
     }
-    av_freep(&s->fft_data);
+    if (s->fft_out) {
+        for (i = 0; i < s->channels; i++)
+            av_freep(&s->fft_out[i]);
+    }
+    av_freep(&s->fft_in);
+    av_freep(&s->fft_out);
     av_freep(&s->window_func_lut);
 }
 
@@ -517,7 +529,6 @@ static const AVFilterPad spectrumsynth_inputs[] = {
         .name         = "phase",
         .type         = AVMEDIA_TYPE_VIDEO,
     },
-    { NULL }
 };
 
 static const AVFilterPad spectrumsynth_outputs[] = {
@@ -526,17 +537,16 @@ static const AVFilterPad spectrumsynth_outputs[] = {
         .type          = AVMEDIA_TYPE_AUDIO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vaf_spectrumsynth = {
-    .name          = "spectrumsynth",
-    .description   = NULL_IF_CONFIG_SMALL("Convert input spectrum videos to audio output."),
+const FFFilter ff_vaf_spectrumsynth = {
+    .p.name        = "spectrumsynth",
+    .p.description = NULL_IF_CONFIG_SMALL("Convert input spectrum videos to audio output."),
+    .p.priv_class  = &spectrumsynth_class,
     .uninit        = uninit,
-    .query_formats = query_formats,
     .activate      = activate,
     .priv_size     = sizeof(SpectrumSynthContext),
-    .inputs        = spectrumsynth_inputs,
-    .outputs       = spectrumsynth_outputs,
-    .priv_class    = &spectrumsynth_class,
+    FILTER_INPUTS(spectrumsynth_inputs),
+    FILTER_OUTPUTS(spectrumsynth_outputs),
+    FILTER_QUERY_FUNC2(query_formats),
 };
