@@ -24,7 +24,9 @@
  */
 
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "mpeg.h"
 
@@ -47,7 +49,7 @@ static const uint8_t ty_AC3AudioPacket[]  = { 0x00, 0x00, 0x01, 0xbd };
 #define CHUNK_PEEK_COUNT  3      /* number of chunks to probe */
 
 typedef struct TyRecHdr {
-    int64_t   rec_size;
+    int32_t   rec_size;
     uint8_t   ex[2];
     uint8_t   rec_type;
     uint8_t   subrec_type;
@@ -308,7 +310,7 @@ static int ty_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     st->codecpar->codec_id   = AV_CODEC_ID_MPEG2VIDEO;
-    st->need_parsing         = AVSTREAM_PARSE_FULL_RAW;
+    ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
     avpriv_set_pts_info(st, 64, 1, 90000);
 
     ast = avformat_new_stream(s, NULL);
@@ -318,7 +320,7 @@ static int ty_read_header(AVFormatContext *s)
 
     if (ty->audio_type == TIVO_AUDIO_MPEG) {
         ast->codecpar->codec_id = AV_CODEC_ID_MP2;
-        ast->need_parsing       = AVSTREAM_PARSE_FULL_RAW;
+        ffstream(ast)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
     } else {
         ast->codecpar->codec_id = AV_CODEC_ID_AC3;
     }
@@ -710,14 +712,14 @@ static int ty_read_close(AVFormatContext *s)
     return 0;
 }
 
-AVInputFormat ff_ty_demuxer = {
-    .name           = "ty",
-    .long_name      = NULL_IF_CONFIG_SMALL("TiVo TY Stream"),
+const FFInputFormat ff_ty_demuxer = {
+    .p.name         = "ty",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("TiVo TY Stream"),
+    .p.extensions   = "ty,ty+",
+    .p.flags        = AVFMT_TS_DISCONT,
     .priv_data_size = sizeof(TYDemuxContext),
     .read_probe     = ty_probe,
     .read_header    = ty_read_header,
     .read_packet    = ty_read_packet,
     .read_close     = ty_read_close,
-    .extensions     = "ty,ty+",
-    .flags          = AVFMT_TS_DISCONT,
 };

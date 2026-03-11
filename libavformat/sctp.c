@@ -220,7 +220,7 @@ static int sctp_open(URLContext *h, const char *uri, int flags)
     cur_ai = ai;
 
 restart:
-    fd = ff_socket(cur_ai->ai_family, SOCK_STREAM, IPPROTO_SCTP);
+    fd = ff_socket(cur_ai->ai_family, SOCK_STREAM, IPPROTO_SCTP, h);
     if (fd < 0) {
         ret = ff_neterrno();
         goto fail;
@@ -282,6 +282,8 @@ fail:
         goto restart;
     }
 fail1:
+    if (fd >= 0)
+        closesocket(fd);
     ret = AVERROR(EIO);
     freeaddrinfo(ai);
     return ret;
@@ -332,6 +334,9 @@ static int sctp_write(URLContext *h, const uint8_t *buf, int size)
     }
 
     if (s->max_streams) {
+        if (size < 2)
+            return AVERROR(EINVAL);
+
         /*StreamId is introduced as a 2byte code into the stream*/
         struct sctp_sndrcvinfo info = { 0 };
         info.sinfo_stream           = AV_RB16(buf);

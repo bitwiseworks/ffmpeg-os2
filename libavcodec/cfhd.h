@@ -23,12 +23,8 @@
 
 #include <stdint.h>
 
-#include "libavutil/avassert.h"
-
 #include "avcodec.h"
 #include "bytestream.h"
-#include "get_bits.h"
-#include "vlc.h"
 #include "cfhddsp.h"
 
 enum CFHDParam {
@@ -101,7 +97,7 @@ enum CFHDParam {
 
 typedef struct CFHD_RL_VLC_ELEM {
     int16_t level;
-    int8_t len;
+    int8_t len8;
     uint16_t run;
 } CFHD_RL_VLC_ELEM;
 
@@ -114,6 +110,7 @@ typedef struct SubBand {
     int width;
     int a_height;
     int height;
+    int8_t read_ok;
 } SubBand;
 
 typedef struct Plane {
@@ -142,14 +139,9 @@ typedef struct CFHDContext {
     AVCodecContext *avctx;
 
     CFHD_RL_VLC_ELEM table_9_rl_vlc[2088];
-    VLC vlc_9;
-
     CFHD_RL_VLC_ELEM table_18_rl_vlc[4572];
-    VLC vlc_18;
 
     int lut[2][256];
-
-    GetBitContext gb;
 
     int planes;
     int frame_type;
@@ -165,6 +157,7 @@ typedef struct CFHDContext {
     int a_width;
     int a_height;
     int a_format;
+    int a_transform_type;
 
     int bpc; // bits per channel/component
     int channel_cnt;

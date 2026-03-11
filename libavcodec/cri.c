@@ -27,16 +27,19 @@
 
 #define BITSTREAM_READER_LE
 
+#include "libavutil/attributes_internal.h"
 #include "libavutil/intfloat.h"
 #include "libavutil/display.h"
 #include "avcodec.h"
 #include "bytestream.h"
+#include "codec_internal.h"
+#include "decode.h"
 #include "get_bits.h"
-#include "internal.h"
 #include "thread.h"
 
 typedef struct CRIContext {
     AVCodecContext *jpeg_avctx;   // wrapper context for MJPEG
+    AVPacket *jpkt;               // encoded JPEG tile
     AVFrame *jpgframe;            // decoded JPEG tile
 
     GetByteContext gb;
@@ -49,24 +52,24 @@ typedef struct CRIContext {
 static av_cold int cri_decode_init(AVCodecContext *avctx)
 {
     CRIContext *s = avctx->priv_data;
-    const AVCodec *codec;
     int ret;
 
     s->jpgframe = av_frame_alloc();
     if (!s->jpgframe)
         return AVERROR(ENOMEM);
 
-    codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
-    if (!codec)
-        return AVERROR_BUG;
-    s->jpeg_avctx = avcodec_alloc_context3(codec);
+    s->jpkt = av_packet_alloc();
+    if (!s->jpkt)
+        return AVERROR(ENOMEM);
+
+    EXTERN const FFCodec ff_mjpeg_decoder;
+    s->jpeg_avctx = avcodec_alloc_context3(&ff_mjpeg_decoder.p);
     if (!s->jpeg_avctx)
         return AVERROR(ENOMEM);
     s->jpeg_avctx->flags = avctx->flags;
     s->jpeg_avctx->flags2 = avctx->flags2;
-    s->jpeg_avctx->dct_algo = avctx->dct_algo;
     s->jpeg_avctx->idct_algo = avctx->idct_algo;
-    ret = ff_codec_open2_recursive(s->jpeg_avctx, codec, NULL);
+    ret = avcodec_open2(s->jpeg_avctx, NULL, NULL);
     if (ret < 0)
         return ret;
 
@@ -80,61 +83,82 @@ static void unpack_10bit(GetByteContext *gb, uint16_t *dst, int shift,
     int pos = 0;
 
     while (count > 0) {
-        uint32_t a0 = bytestream2_get_le32(gb);
-        uint32_t a1 = bytestream2_get_le32(gb);
-        uint32_t a2 = bytestream2_get_le32(gb);
-        uint32_t a3 = bytestream2_get_le32(gb);
+        uint32_t a0, a1, a2, a3;
+        if (bytestream2_get_bytes_left(gb) < 4)
+            break;
+        a0 = bytestream2_get_le32(gb);
+        a1 = bytestream2_get_le32(gb);
+        a2 = bytestream2_get_le32(gb);
+        a3 = bytestream2_get_le32(gb);
         dst[pos] = (((a0 >> 1) & 0xE00) | (a0 & 0x1FF)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 1)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a0 >> 13) & 0x3F) | ((a0 >> 14) & 0xFC0)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 2)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a0 >> 26) & 7) | ((a1 & 0x1FF) << 3)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 3)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a1 >> 10) & 0x1FF) | ((a1 >> 11) & 0xE00)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 4)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a1 >> 23) & 0x3F) | ((a2 & 0x3F) << 6)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 5)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a2 >> 7) & 0xFF8) | ((a2 >> 6) & 7)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 6)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a3 & 7) << 9) | ((a2 >> 20) & 0x1FF)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 7)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a3 >> 4) & 0xFC0) | ((a3 >> 3) & 0x3F)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 8)
+                break;
             dst += stride;
             pos = 0;
         }
         dst[pos] = (((a3 >> 16) & 7) | ((a3 >> 17) & 0xFF8)) << shift;
         pos++;
         if (pos >= w) {
+            if (count == 9)
+                break;
             dst += stride;
             pos = 0;
         }
@@ -143,16 +167,14 @@ static void unpack_10bit(GetByteContext *gb, uint16_t *dst, int shift,
     }
 }
 
-static int cri_decode_frame(AVCodecContext *avctx, void *data,
+static int cri_decode_frame(AVCodecContext *avctx, AVFrame *p,
                             int *got_frame, AVPacket *avpkt)
 {
     CRIContext *s = avctx->priv_data;
     GetByteContext *gb = &s->gb;
-    ThreadFrame frame = { .f = data };
     int ret, bps, hflip = 0, vflip = 0;
     AVFrameSideData *rotation;
     int compressed = 0;
-    AVFrame *p = data;
 
     s->data = NULL;
     s->data_size = 0;
@@ -163,6 +185,7 @@ static int cri_decode_frame(AVCodecContext *avctx, void *data,
         char codec_name[1024];
         uint32_t key, length;
         float framerate;
+        int width, height;
 
         key    = bytestream2_get_le32(gb);
         length = bytestream2_get_le32(gb);
@@ -178,11 +201,14 @@ static int cri_decode_frame(AVCodecContext *avctx, void *data,
         case 100:
             if (length < 16)
                 return AVERROR_INVALIDDATA;
-            avctx->width   = bytestream2_get_le32(gb);
-            avctx->height  = bytestream2_get_le32(gb);
+            width   = bytestream2_get_le32(gb);
+            height  = bytestream2_get_le32(gb);
             s->color_model = bytestream2_get_le32(gb);
             if (bytestream2_get_le32(gb) != 1)
                 return AVERROR_INVALIDDATA;
+            ret = ff_set_dimensions(avctx, width, height);
+            if (ret < 0)
+                return ret;
             length -= 16;
             goto skip;
         case 101:
@@ -192,10 +218,12 @@ static int cri_decode_frame(AVCodecContext *avctx, void *data,
             if (bytestream2_get_le32(gb) != 0)
                 return AVERROR_INVALIDDATA;
             break;
-        case 102:
-            bytestream2_get_buffer(gb, codec_name, FFMIN(length, sizeof(codec_name) - 1));
-            length -= FFMIN(length, sizeof(codec_name) - 1);
-            if (strncmp(codec_name, "cintel_craw", FFMIN(length, sizeof(codec_name) - 1)))
+        case 102:;
+            int read_len = FFMIN(length, sizeof(codec_name) - 1);
+            if (read_len != bytestream2_get_buffer(gb, codec_name, read_len))
+                return AVERROR_INVALIDDATA;
+            length -= read_len;
+            if (strncmp(codec_name, "cintel_craw", read_len))
                 return AVERROR_INVALIDDATA;
             compressed = 1;
             goto skip;
@@ -206,10 +234,14 @@ static int cri_decode_frame(AVCodecContext *avctx, void *data,
             s->data_size = length;
             goto skip;
         case 105:
+            if (length <= 0)
+                return AVERROR_INVALIDDATA;
             hflip = bytestream2_get_byte(gb) != 0;
             length--;
             goto skip;
         case 106:
+            if (length <= 0)
+                return AVERROR_INVALIDDATA;
             vflip = bytestream2_get_byte(gb) != 0;
             length--;
             goto skip;
@@ -288,7 +320,10 @@ skip:
     if (!s->data || !s->data_size)
         return AVERROR_INVALIDDATA;
 
-    if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+    if (avctx->skip_frame >= AVDISCARD_ALL)
+        return avpkt->size;
+
+    if ((ret = ff_thread_get_buffer(avctx, p, 0)) < 0)
         return ret;
 
     avctx->bits_per_raw_sample = bps;
@@ -310,6 +345,9 @@ skip:
         for (int y = 0; y < avctx->height; y++) {
             uint16_t *dst = (uint16_t *)(p->data[0] + y * p->linesize[0]);
 
+            if (get_bits_left(&gbit) < avctx->width * bps)
+                break;
+
             for (int x = 0; x < avctx->width; x++)
                 dst[x] = get_bits(&gbit, bps) << shift;
         }
@@ -317,13 +355,11 @@ skip:
         unsigned offset = 0;
 
         for (int tile = 0; tile < 4; tile++) {
-            AVPacket jpkt;
+            av_packet_unref(s->jpkt);
+            s->jpkt->data = (uint8_t *)s->data + offset;
+            s->jpkt->size = s->tile_size[tile];
 
-            av_init_packet(&jpkt);
-            jpkt.data = (uint8_t *)s->data + offset;
-            jpkt.size = s->tile_size[tile];
-
-            ret = avcodec_send_packet(s->jpeg_avctx, &jpkt);
+            ret = avcodec_send_packet(s->jpeg_avctx, s->jpkt);
             if (ret < 0) {
                 av_log(avctx, AV_LOG_ERROR, "Error submitting a packet for decoding\n");
                 return ret;
@@ -366,16 +402,13 @@ skip:
     }
 
     if (hflip || vflip) {
-        rotation = av_frame_new_side_data(p, AV_FRAME_DATA_DISPLAYMATRIX,
-                                          sizeof(int32_t) * 9);
+        ff_frame_new_side_data(avctx, p, AV_FRAME_DATA_DISPLAYMATRIX,
+                               sizeof(int32_t) * 9, &rotation);
         if (rotation) {
             av_display_rotation_set((int32_t *)rotation->data, 0.f);
             av_display_matrix_flip((int32_t *)rotation->data, hflip, vflip);
         }
     }
-
-    p->pict_type = AV_PICTURE_TYPE_I;
-    p->key_frame = 1;
 
     *got_frame = 1;
 
@@ -387,20 +420,22 @@ static av_cold int cri_decode_close(AVCodecContext *avctx)
     CRIContext *s = avctx->priv_data;
 
     av_frame_free(&s->jpgframe);
+    av_packet_free(&s->jpkt);
     avcodec_free_context(&s->jpeg_avctx);
 
     return 0;
 }
 
-AVCodec ff_cri_decoder = {
-    .name           = "cri",
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_CRI,
+const FFCodec ff_cri_decoder = {
+    .p.name         = "cri",
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_CRI,
     .priv_data_size = sizeof(CRIContext),
     .init           = cri_decode_init,
-    .decode         = cri_decode_frame,
+    FF_CODEC_DECODE_CB(cri_decode_frame),
     .close          = cri_decode_close,
-    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
-    .long_name      = NULL_IF_CONFIG_SMALL("Cintel RAW"),
+    .p.capabilities = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP |
+                      FF_CODEC_CAP_SKIP_FRAME_FILL_PARAM,
+    CODEC_LONG_NAME("Cintel RAW"),
 };

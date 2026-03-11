@@ -22,16 +22,15 @@
 /**
  * @file
  * Apple HTTP Live Streaming Protocol Handler
- * http://tools.ietf.org/html/draft-pantos-http-live-streaming
+ * https://www.rfc-editor.org/rfc/rfc8216.txt
  */
 
 #include "libavutil/avstring.h"
+#include "libavutil/mem.h"
 #include "libavutil/time.h"
-#include "avformat.h"
 #include "avio_internal.h"
 #include "internal.h"
 #include "url.h"
-#include "version.h"
 
 /*
  * An apple http stream consists of a playlist with media segment files,
@@ -207,10 +206,10 @@ static int hls_open(URLContext *h, const char *uri, int flags)
         goto fail;
     }
     av_log(h, AV_LOG_WARNING,
-           "Using the hls protocol is discouraged, please try using the "
-           "hls demuxer instead. The hls demuxer should be more complete "
-           "and work as well as the protocol implementation. (If not, "
-           "please report it.) To use the demuxer, simply use %s as url.\n",
+           "Using the hls protocol is deprecated and it will be remove in "
+           "a future release, please use the hls demuxer instead. "
+           "If encountering issues with it, please report them. "
+           "To use the demuxer, simply use %s as url.\n",
            s->playlisturl);
 
     if ((ret = parse_playlist(h, s->playlisturl)) < 0)

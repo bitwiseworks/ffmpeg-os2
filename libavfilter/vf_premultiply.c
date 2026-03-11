@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config_components.h"
+
 #include "libavutil/imgutils.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
@@ -25,7 +27,6 @@
 #include "filters.h"
 #include "formats.h"
 #include "framesync.h"
-#include "internal.h"
 #include "video.h"
 
 typedef struct ThreadData {
@@ -34,8 +35,8 @@ typedef struct ThreadData {
 
 typedef struct PreMultiplyContext {
     const AVClass *class;
-    int width[4], height[4];
-    int linesize[4];
+    int width[AV_VIDEO_MAX_PLANES], height[AV_VIDEO_MAX_PLANES];
+    int linesize[AV_VIDEO_MAX_PLANES];
     int nb_planes;
     int planes;
     int inverse;
@@ -43,7 +44,7 @@ typedef struct PreMultiplyContext {
     int half, depth, offset, max;
     FFFrameSync fs;
 
-    void (*premultiply[4])(const uint8_t *msrc, const uint8_t *asrc,
+    void (*premultiply[AV_VIDEO_MAX_PLANES])(const uint8_t *msrc, const uint8_t *asrc,
                            uint8_t *dst,
                            ptrdiff_t mlinesize, ptrdiff_t alinesize,
                            ptrdiff_t dlinesize,
@@ -60,12 +61,13 @@ static const AVOption options[] = {
     { NULL }
 };
 
-#define premultiply_options options
-AVFILTER_DEFINE_CLASS(premultiply);
+AVFILTER_DEFINE_CLASS_EXT(premultiply, "(un)premultiply", options);
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    PreMultiplyContext *s = ctx->priv;
+    const PreMultiplyContext *s = ctx->priv;
 
     static const enum AVPixelFormat no_alpha_pix_fmts[] = {
         AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
@@ -86,7 +88,8 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
 
-    return ff_set_common_formats(ctx, ff_make_format_list(s->inplace ? alpha_pix_fmts : no_alpha_pix_fmts));
+    return ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out,
+                                            s->inplace ? alpha_pix_fmts : no_alpha_pix_fmts);
 }
 
 static void premultiply8(const uint8_t *msrc, const uint8_t *asrc,
@@ -100,7 +103,7 @@ static void premultiply8(const uint8_t *msrc, const uint8_t *asrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((msrc[x] * (((asrc[x] >> 1) & 1) + asrc[x])) + 128) >> 8;
+            dst[x] = (msrc[x] * asrc[x] + 128) >> 8;
         }
 
         dst  += dlinesize;
@@ -120,7 +123,7 @@ static void premultiply8yuv(const uint8_t *msrc, const uint8_t *asrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((((msrc[x] - 128) * (((asrc[x] >> 1) & 1) + asrc[x]))) >> 8) + 128;
+            dst[x] = (((msrc[x] - 128) * asrc[x]) >> 8) + 128;
         }
 
         dst  += dlinesize;
@@ -140,7 +143,7 @@ static void premultiply8offset(const uint8_t *msrc, const uint8_t *asrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((((msrc[x] - offset) * (((asrc[x] >> 1) & 1) + asrc[x])) + 128) >> 8) + offset;
+            dst[x] = ((((msrc[x] - offset) * asrc[x]) + 128) >> 8) + offset;
         }
 
         dst  += dlinesize;
@@ -163,7 +166,7 @@ static void premultiply16(const uint8_t *mmsrc, const uint8_t *aasrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((msrc[x] * (((asrc[x] >> 1) & 1) + asrc[x])) + half) >> shift;
+            dst[x] = (msrc[x] * asrc[x] + half) >> shift;
         }
 
         dst  += dlinesize / 2;
@@ -186,7 +189,7 @@ static void premultiply16yuv(const uint8_t *mmsrc, const uint8_t *aasrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((((msrc[x] - half) * (int64_t)(((asrc[x] >> 1) & 1) + asrc[x]))) >> shift) + half;
+            dst[x] = (((msrc[x] - half) * (int64_t)asrc[x]) >> shift) + half;
         }
 
         dst  += dlinesize / 2;
@@ -209,7 +212,7 @@ static void premultiply16offset(const uint8_t *mmsrc, const uint8_t *aasrc,
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            dst[x] = ((((msrc[x] - offset) * (int64_t)(((asrc[x] >> 1) & 1) + asrc[x])) + half) >> shift) + offset;
+            dst[x] = ((((msrc[x] - offset) * (int64_t)asrc[x]) + half) >> shift) + offset;
         }
 
         dst  += dlinesize / 2;
@@ -635,8 +638,8 @@ static int filter_frame(AVFilterContext *ctx,
         td.d = *out;
         td.a = alpha;
         td.m = base;
-        ctx->internal->execute(ctx, premultiply_slice, &td, NULL, FFMIN(s->height[0],
-                                                                        ff_filter_get_nb_threads(ctx)));
+        ff_filter_execute(ctx, premultiply_slice, &td, NULL,
+                          FFMIN(s->height[0], ff_filter_get_nb_threads(ctx)));
     }
 
     return 0;
@@ -695,16 +698,14 @@ static int config_output(AVFilterLink *outlink)
     PreMultiplyContext *s = ctx->priv;
     AVFilterLink *base = ctx->inputs[0];
     AVFilterLink *alpha;
+    FilterLink *il = ff_filter_link(base);
+    FilterLink *ol = ff_filter_link(outlink);
     FFFrameSyncIn *in;
     int ret;
 
     if (!s->inplace) {
         alpha = ctx->inputs[1];
 
-        if (base->format != alpha->format) {
-            av_log(ctx, AV_LOG_ERROR, "inputs must be of same pixel format\n");
-            return AVERROR(EINVAL);
-        }
         if (base->w                       != alpha->w ||
             base->h                       != alpha->h) {
             av_log(ctx, AV_LOG_ERROR, "First input link %s parameters "
@@ -720,7 +721,7 @@ static int config_output(AVFilterLink *outlink)
     outlink->h = base->h;
     outlink->time_base = base->time_base;
     outlink->sample_aspect_ratio = base->sample_aspect_ratio;
-    outlink->frame_rate = base->frame_rate;
+    ol->frame_rate = il->frame_rate;
 
     if (s->inplace)
         return 0;
@@ -790,7 +791,7 @@ static av_cold int init(AVFilterContext *ctx)
     pad.name         = "main";
     pad.config_props = config_input;
 
-    if ((ret = ff_insert_inpad(ctx, 0, &pad)) < 0)
+    if ((ret = ff_append_inpad(ctx, &pad)) < 0)
         return ret;
 
     if (!s->inplace) {
@@ -798,7 +799,7 @@ static av_cold int init(AVFilterContext *ctx)
         pad.name         = "alpha";
         pad.config_props = NULL;
 
-        if ((ret = ff_insert_inpad(ctx, 1, &pad)) < 0)
+        if ((ret = ff_append_inpad(ctx, &pad)) < 0)
             return ret;
     }
 
@@ -819,48 +820,42 @@ static const AVFilterPad premultiply_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
 #if CONFIG_PREMULTIPLY_FILTER
 
-AVFilter ff_vf_premultiply = {
-    .name          = "premultiply",
-    .description   = NULL_IF_CONFIG_SMALL("PreMultiply first stream with first plane of second stream."),
+const FFFilter ff_vf_premultiply = {
+    .p.name        = "premultiply",
+    .p.description = NULL_IF_CONFIG_SMALL("PreMultiply first stream with first plane of second stream."),
+    .p.priv_class  = &premultiply_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
+                     AVFILTER_FLAG_DYNAMIC_INPUTS |
+                     AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(PreMultiplyContext),
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
     .activate      = activate,
-    .inputs        = NULL,
-    .outputs       = premultiply_outputs,
-    .priv_class    = &premultiply_class,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
-                     AVFILTER_FLAG_DYNAMIC_INPUTS |
-                     AVFILTER_FLAG_SLICE_THREADS,
+    FILTER_OUTPUTS(premultiply_outputs),
+    FILTER_QUERY_FUNC2(query_formats),
 };
 
 #endif /* CONFIG_PREMULTIPLY_FILTER */
 
 #if CONFIG_UNPREMULTIPLY_FILTER
 
-#define unpremultiply_options options
-AVFILTER_DEFINE_CLASS(unpremultiply);
-
-AVFilter ff_vf_unpremultiply = {
-    .name          = "unpremultiply",
-    .description   = NULL_IF_CONFIG_SMALL("UnPreMultiply first stream with first plane of second stream."),
+const FFFilter ff_vf_unpremultiply = {
+    .p.name        = "unpremultiply",
+    .p.description = NULL_IF_CONFIG_SMALL("UnPreMultiply first stream with first plane of second stream."),
+    .p.priv_class  = &premultiply_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
+                     AVFILTER_FLAG_DYNAMIC_INPUTS |
+                     AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(PreMultiplyContext),
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
     .activate      = activate,
-    .inputs        = NULL,
-    .outputs       = premultiply_outputs,
-    .priv_class    = &unpremultiply_class,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
-                     AVFILTER_FLAG_DYNAMIC_INPUTS |
-                     AVFILTER_FLAG_SLICE_THREADS,
+    FILTER_OUTPUTS(premultiply_outputs),
+    FILTER_QUERY_FUNC2(query_formats),
 };
 
 #endif /* CONFIG_UNPREMULTIPLY_FILTER */
